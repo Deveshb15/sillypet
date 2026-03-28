@@ -144,10 +144,10 @@ class ClaudeMonitor: AgentMonitor {
 
         switch stopReason {
         case "end_turn":
-            // Claude finished a turn — could be a question, task done, or just responding.
-            // Don't fire taskCompleted (that comes from the TaskCompleted hook).
-            // Instead, start a timer: if no new activity in 6s, alert the user.
-            startAttentionTimer(sessionId: sessionId, delay: 6.0,
+            // Claude finished a turn — could be a question, task done, or waiting for input.
+            // Don't fire taskCompleted (that comes from the TaskCompleted hook only).
+            // Start a timer: if no new activity in 8s, alert the user.
+            startAttentionTimer(sessionId: sessionId, delay: 8.0,
                                message: "Claude needs your input", toolName: nil)
 
         case "tool_use":
@@ -157,9 +157,10 @@ class ClaudeMonitor: AgentMonitor {
 
             fireEvent(.working, message: "Using \(toolName ?? "tool")", sessionId: sessionId, toolName: toolName)
 
-            // Start permission detection: if no new transcript activity within
-            // 4 seconds, the tool likely needs user permission
-            startAttentionTimer(sessionId: sessionId, delay: 4.0,
+            // Start attention timer: if no new transcript activity within 5s,
+            // the tool likely needs user permission (or a subagent does).
+            // Hooks are more reliable but don't hot-reload mid-session.
+            startAttentionTimer(sessionId: sessionId, delay: 5.0,
                                message: "Needs permission for \(toolName ?? "tool")", toolName: toolName)
 
         default:

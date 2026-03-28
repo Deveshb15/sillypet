@@ -7,6 +7,13 @@ class PetScene: SKScene {
     private var currentAnimationKey: String = ""
     private var confettiEmitter: SKEmitterNode?
 
+    // Drag callbacks
+    var onDragStart: (() -> Void)?
+    var onDragMove: ((CGPoint) -> Void)?
+    var onDragEnd: (() -> Void)?
+    private var isDragging = false
+    private var dragOffset: CGPoint = .zero
+
     init(size: CGSize, spriteType: SpriteType) {
         self.spriteType = spriteType
         // Create sprite with first idle frame
@@ -65,6 +72,29 @@ class PetScene: SKScene {
 
     func hideBubble() {
         speechBubble.hide()
+    }
+
+    // MARK: - Drag to move
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        let screenPos = NSEvent.mouseLocation
+        let windowOrigin = view?.window?.frame.origin ?? .zero
+        dragOffset = CGPoint(x: screenPos.x - windowOrigin.x, y: screenPos.y - windowOrigin.y)
+        onDragStart?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let screenPos = NSEvent.mouseLocation
+        let newOrigin = CGPoint(x: screenPos.x - dragOffset.x, y: screenPos.y - dragOffset.y)
+        onDragMove?(newOrigin)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDragging else { return }
+        isDragging = false
+        onDragEnd?()
     }
 
     func playCelebration() {

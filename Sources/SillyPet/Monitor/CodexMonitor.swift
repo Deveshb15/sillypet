@@ -160,9 +160,10 @@ class CodexMonitor: AgentMonitor {
             if itemType == "function_call" {
                 let name = payload["name"] as? String
                 fire(AgentEvent(source: .codex, kind: .working, message: "Using \(name ?? "tool")", toolName: name))
-                // Start permission timer: if no output follows within 4s, it needs approval
-                startAttentionTimer(key: sessionFile, delay: 4.0,
-                                   message: "Needs permission for \(name ?? "tool")", toolName: name)
+                // Start permission timer: if no output follows within 10s, it likely needs approval.
+                // Longer timeout to avoid false positives from slow-executing commands.
+                startAttentionTimer(key: sessionFile, delay: 10.0,
+                                   message: "Codex needs permission for \(name ?? "tool")", toolName: name)
             } else if itemType == "function_call_output" {
                 cancelAttentionTimer(key: sessionFile)
             }

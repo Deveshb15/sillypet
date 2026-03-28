@@ -14,6 +14,7 @@ class Pet {
     private var updateTimer: Timer?
     private var lastUpdateTime: CFTimeInterval = 0
     private var followingCursor = false
+    private var isDragging = false
 
     init(type: AgentType, spriteType: SpriteType = .dog) {
         self.type = type
@@ -26,6 +27,7 @@ class Pet {
         self.stateMachine = PetStateMachine()
 
         setupStateMachineCallbacks()
+        setupDragCallbacks()
         startUpdateLoop()
 
         window.orderFront(nil)
@@ -115,6 +117,45 @@ class Pet {
         }
     }
 
+    private func setupDragCallbacks() {
+        scene.onDragStart = { [weak self] in
+            guard let self = self else { return }
+            self.isDragging = true
+            self.movement.stop()
+            self.followingCursor = false
+        }
+
+        scene.onDragMove = { [weak self] newOrigin in
+            guard let self = self else { return }
+            self.window.setFrameOrigin(NSPoint(x: newOrigin.x, y: newOrigin.y))
+            self.movement.position = newOrigin
+        }
+
+        scene.onDragEnd = { [weak self] in
+            guard let self = self else { return }
+            self.isDragging = false
+            let quips = [
+                "Ouch! Don't move me\nlike that!",
+                "Hey! I was comfy\nthere!",
+                "Rude. I had the\nperfect spot.",
+                "Excuse me, I'm\nworking here!",
+                "Wheee! Do it again!\n...wait, no.",
+                "I'm not a file.\nYou can't drag me!",
+                "This is NOT in my\njob description.",
+                "Put me down! I have\nagents to watch!",
+                "My pixels are\nall scrambled now!",
+                "Was it something\nI said?",
+                "I just got here\nand you move me?!",
+                "Fine. This spot\nis better anyway.",
+                "Warning: pet may\nbite if moved again",
+                "Recalculating\nroute...",
+                "You could've just\nasked nicely!",
+            ]
+            self.scene.showBubble(text: quips.randomElement()!, duration: 3.0)
+            self.stateMachine.transition(to: .idle)
+        }
+    }
+
     private func startUpdateLoop() {
         lastUpdateTime = CACurrentMediaTime()
         updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -126,6 +167,9 @@ class Pet {
         let now = CACurrentMediaTime()
         let dt = CGFloat(now - lastUpdateTime)
         lastUpdateTime = now
+
+        // Skip movement while user is dragging the pet
+        if isDragging { return }
 
         // Update cursor tracking for running state
         if followingCursor {
