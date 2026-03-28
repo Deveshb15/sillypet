@@ -37,10 +37,13 @@ After delivering a notification, the dog walks back to the side of the screen an
 
 1. Download `SillyPet.dmg` from the [latest release](https://github.com/Deveshb15/sillypet/releases/latest)
 2. Open the DMG and drag `SillyPet.app` to **Applications**
-3. **Important**: Since the app isn't notarized, macOS may block it. To open:
-   - Right-click `SillyPet.app` → **Open** → click **Open** in the dialog
-   - Or run: `xattr -cr /Applications/SillyPet.app`
-4. Pick your pet on first launch!
+3. Pick your pet on first launch!
+
+> **macOS may block the app** since it isn't notarized (this is normal for open-source apps). To fix:
+>
+> Go to **System Settings** → **Privacy & Security** → scroll down → click **Open Anyway** next to SillyPet
+>
+> Or run in Terminal: `xattr -cr /Applications/SillyPet.app`
 
 ## Build from source
 

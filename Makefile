@@ -27,17 +27,7 @@ run: bundle
 	@open "$(APP_BUNDLE)"
 
 dmg: bundle
-	@echo "Creating DMG..."
-	@rm -rf dmg_staging SillyPet.dmg
-	@mkdir -p dmg_staging
-	@cp -R "$(APP_BUNDLE)" dmg_staging/
-	@ln -s /Applications dmg_staging/Applications
-	@hdiutil create -volname "SillyPet" -srcfolder dmg_staging \
-		-ov -format UDZO -fs HFS+ \
-		-imagekey zlib-level=9 \
-		SillyPet.dmg
-	@rm -rf dmg_staging
-	@echo "Created SillyPet.dmg"
+	@bash scripts/create_dmg.sh
 
 clean:
 	swift package clean
