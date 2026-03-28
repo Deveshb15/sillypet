@@ -7,7 +7,7 @@ class PetWindow: NSPanel {
     let skView: SKView
     let petScene: PetScene
 
-    init() {
+    init(spriteType: SpriteType = .dog) {
         let size = NSSize(width: Self.windowSize, height: Self.windowSize)
 
         skView = SKView(frame: NSRect(origin: .zero, size: size))
@@ -15,7 +15,7 @@ class PetWindow: NSPanel {
         skView.wantsLayer = true
         skView.layer?.isOpaque = false
 
-        petScene = PetScene(size: CGSize(width: Self.windowSize, height: Self.windowSize))
+        petScene = PetScene(size: CGSize(width: Self.windowSize, height: Self.windowSize), spriteType: spriteType)
 
         super.init(
             contentRect: NSRect(origin: .zero, size: size),

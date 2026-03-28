@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     static var shared: AppDelegate!
@@ -7,9 +8,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var pets: [Pet] = []
     @Published var sessions: [AgentSession] = []
     @Published var eventLog: [String] = []
+    @Published var selectedSpriteType: SpriteType = .dog
 
     private var claudeMonitor: ClaudeMonitor?
     private var codexMonitor: CodexMonitor?
+    private var onboardingWindow: NSWindow?
 
     override init() {
         super.init()
@@ -19,14 +22,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // Spawn the default pet
-        let pet = Pet(type: .claude)
-        pets.append(pet)
-
-        // Start monitors
-        startMonitors()
-
-        print("[SillyPet] Running! Your Shiba Inu is now on screen.")
+        if let saved = SpriteType.saved {
+            // Returning user — create pet with saved choice
+            selectedSpriteType = saved
+            spawnPet(spriteType: saved)
+            startMonitors()
+            print("[SillyPet] Running! Your \(saved.displayName) is now on screen.")
+        } else {
+            // First launch — show onboarding
+            showOnboarding()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -34,7 +39,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         codexMonitor?.stop()
     }
 
+    // MARK: - Onboarding
+
+    func showOnboarding() {
+        let view = OnboardingView { [weak self] selected in
+            self?.onboardingComplete(selected)
+        }
+        let hostingController = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Welcome to SillyPet!"
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 520, height: 560))
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow = window
+    }
+
+    private func onboardingComplete(_ type: SpriteType) {
+        type.save()
+        selectedSpriteType = type
+        onboardingWindow?.close()
+        onboardingWindow = nil
+
+        // Remove existing pets and create new one
+        for pet in pets {
+            pet.window.close()
+        }
+        pets.removeAll()
+
+        spawnPet(spriteType: type)
+        startMonitors()
+        print("[SillyPet] Running! Your \(type.displayName) is now on screen.")
+    }
+
+    func changePet() {
+        showOnboarding()
+    }
+
+    private func spawnPet(spriteType: SpriteType) {
+        let pet = Pet(type: .claude, spriteType: spriteType)
+        pets.append(pet)
+    }
+
     private func startMonitors() {
+        guard claudeMonitor == nil else { return }
+
         // Claude Code monitor
         claudeMonitor = ClaudeMonitor()
         claudeMonitor?.onEvent = { [weak self] event in

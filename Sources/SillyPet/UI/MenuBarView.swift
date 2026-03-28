@@ -81,6 +81,20 @@ struct MenuBarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
 
+            Button(action: {
+                appDelegate.changePet()
+            }) {
+                HStack {
+                    Text("Change Pet")
+                    Spacer()
+                    Text(appDelegate.selectedSpriteType.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+
             Divider()
 
             // Quit

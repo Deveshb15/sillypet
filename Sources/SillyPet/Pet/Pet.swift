@@ -4,6 +4,7 @@ import SpriteKit
 /// A single pet instance — owns its window, scene, state machine, and movement.
 class Pet {
     let type: AgentType
+    let spriteType: SpriteType
     let window: PetWindow
     let movement: PetMovement
     let stateMachine: PetStateMachine
@@ -14,9 +15,10 @@ class Pet {
     private var lastUpdateTime: CFTimeInterval = 0
     private var followingCursor = false
 
-    init(type: AgentType) {
+    init(type: AgentType, spriteType: SpriteType = .dog) {
         self.type = type
-        self.window = PetWindow()
+        self.spriteType = spriteType
+        self.window = PetWindow(spriteType: spriteType)
         self.movement = PetMovement(position: CGPoint(
             x: window.frame.origin.x,
             y: window.frame.origin.y

@@ -3,12 +3,14 @@ import SpriteKit
 class PetScene: SKScene {
     let petSprite: SKSpriteNode
     let speechBubble: SpeechBubble
+    let spriteType: SpriteType
     private var currentAnimationKey: String = ""
     private var confettiEmitter: SKEmitterNode?
 
-    override init(size: CGSize) {
+    init(size: CGSize, spriteType: SpriteType) {
+        self.spriteType = spriteType
         // Create sprite with first idle frame
-        let initialTexture = PetSprites.texturesForState(.idle).first!
+        let initialTexture = PetSprites.texturesForState(.idle, spriteType: spriteType).first!
         petSprite = SKSpriteNode(texture: initialTexture)
         petSprite.setScale(1.0)
         speechBubble = SpeechBubble()
@@ -42,7 +44,7 @@ class PetScene: SKScene {
 
         petSprite.removeAction(forKey: "animation")
 
-        let textures = PetSprites.texturesForState(state)
+        let textures = PetSprites.texturesForState(state, spriteType: spriteType)
         guard !textures.isEmpty else { return }
 
         if textures.count == 1 {
