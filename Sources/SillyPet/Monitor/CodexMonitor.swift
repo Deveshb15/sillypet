@@ -10,6 +10,10 @@ class CodexMonitor: AgentMonitor {
     private var watchedFiles: [String: UInt64] = [:]  // path -> last read offset
     private var pollTimer: Timer?
 
+    // Permission detection: if function_call appears and no function_call_output
+    // follows within 4 seconds, fire permissionRequest
+    private var pendingPermissions: [String: (timer: Timer, toolName: String?)] = [:]
+
     init() {
         sessionsDir = NSHomeDirectory() + "/.codex/sessions"
     }
@@ -30,6 +34,8 @@ class CodexMonitor: AgentMonitor {
         source = nil
         pollTimer?.invalidate()
         pollTimer = nil
+        for (_, pending) in pendingPermissions { pending.timer.invalidate() }
+        pendingPermissions.removeAll()
         if dirFD >= 0 { close(dirFD) }
     }
 
@@ -102,17 +108,12 @@ class CodexMonitor: AgentMonitor {
                 continue
             }
 
-            if let event = parseCodexEvent(json) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onEvent?(event)
-                }
-            }
+            parseCodexEvent(json, sessionFile: path)
         }
     }
 
-    private func parseCodexEvent(_ json: [String: Any]) -> AgentEvent? {
+    private func parseCodexEvent(_ json: [String: Any], sessionFile: String) {
         let type = json["type"] as? String ?? ""
-        // Codex JSONL uses "payload" as the data key
         let payload = json["payload"] as? [String: Any] ?? [:]
 
         // Handle event_msg type
@@ -121,47 +122,84 @@ class CodexMonitor: AgentMonitor {
 
             switch msgType {
             case "task_started":
-                return AgentEvent(source: .codex, kind: .sessionStart, message: "Codex started working")
+                cancelPermissionTimer(key: sessionFile)
+                fire(AgentEvent(source: .codex, kind: .sessionStart, message: "Codex started working"))
 
             case "task_complete":
+                cancelPermissionTimer(key: sessionFile)
                 let lastMessage = payload["last_agent_message"] as? String
-                return AgentEvent(source: .codex, kind: .taskCompleted, message: lastMessage ?? "Task complete")
+                fire(AgentEvent(source: .codex, kind: .taskCompleted, message: lastMessage ?? "Task complete"))
 
             case "turn_aborted":
+                cancelPermissionTimer(key: sessionFile)
                 let reason = payload["reason"] as? String
-                return AgentEvent(source: .codex, kind: .error, message: reason ?? "Turn aborted")
+                fire(AgentEvent(source: .codex, kind: .error, message: reason ?? "Turn aborted"))
 
             case "agent_message":
-                return AgentEvent(source: .codex, kind: .working, message: "Codex is responding")
+                cancelPermissionTimer(key: sessionFile)
+                fire(AgentEvent(source: .codex, kind: .working, message: "Codex is responding"))
 
             case "user_message":
-                return AgentEvent(source: .codex, kind: .working, message: "Codex received prompt")
+                cancelPermissionTimer(key: sessionFile)
+                fire(AgentEvent(source: .codex, kind: .working, message: "Codex received prompt"))
 
             default:
-                return nil
+                break
             }
+            return
         }
 
-        // Handle response_item type (function calls = tool use)
+        // Handle response_item type
         if type == "response_item" {
             let itemType = payload["type"] as? String ?? ""
 
             if itemType == "function_call" {
                 let name = payload["name"] as? String
-                return AgentEvent(source: .codex, kind: .toolUse, toolName: name)
+                fire(AgentEvent(source: .codex, kind: .working, message: "Using \(name ?? "tool")", toolName: name))
+                // Start permission timer: if no output follows within 4s, it needs approval
+                startPermissionTimer(key: sessionFile, toolName: name)
+            } else if itemType == "function_call_output" {
+                // Tool executed — cancel pending permission
+                cancelPermissionTimer(key: sessionFile)
             }
+            return
         }
 
-        // Handle session_meta (first event in a session file)
         if type == "session_meta" {
-            return AgentEvent(source: .codex, kind: .sessionStart, message: "Codex session started")
+            fire(AgentEvent(source: .codex, kind: .sessionStart, message: "Codex session started"))
+            return
         }
 
-        // Handle turn_context (new turn started)
         if type == "turn_context" {
-            return AgentEvent(source: .codex, kind: .working, message: "Codex is thinking")
+            cancelPermissionTimer(key: sessionFile)
+            fire(AgentEvent(source: .codex, kind: .working, message: "Codex is thinking"))
         }
+    }
 
-        return nil
+    // MARK: - Permission Detection
+
+    private func startPermissionTimer(key: String, toolName: String?) {
+        cancelPermissionTimer(key: key)
+
+        let timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.pendingPermissions.removeValue(forKey: key)
+            self.fire(AgentEvent(source: .codex, kind: .permissionRequest,
+                                 message: "Needs permission for \(toolName ?? "tool")",
+                                 toolName: toolName))
+        }
+        pendingPermissions[key] = (timer: timer, toolName: toolName)
+    }
+
+    private func cancelPermissionTimer(key: String) {
+        if let pending = pendingPermissions.removeValue(forKey: key) {
+            pending.timer.invalidate()
+        }
+    }
+
+    private func fire(_ event: AgentEvent) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onEvent?(event)
+        }
     }
 }
