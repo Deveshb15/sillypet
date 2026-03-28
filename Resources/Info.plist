@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>OpenPet</string>
+    <string>SillyPet</string>
     <key>CFBundleDisplayName</key>
-    <string>OpenPet</string>
+    <string>SillyPet</string>
     <key>CFBundleIdentifier</key>
-    <string>com.openpet.app</string>
+    <string>com.sillypet.app</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
-    <string>OpenPet</string>
+    <string>SillyPet</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>

@@ -9,7 +9,7 @@ struct MenuBarView: View {
             HStack {
                 Image(systemName: "pawprint.fill")
                     .foregroundStyle(.orange)
-                Text("OpenPet")
+                Text("SillyPet")
                     .font(.headline)
                 Spacer()
                 Text("v0.1")
@@ -88,7 +88,7 @@ struct MenuBarView: View {
                 NSApplication.shared.terminate(nil)
             }) {
                 HStack {
-                    Text("Quit OpenPet")
+                    Text("Quit SillyPet")
                     Spacer()
                     Text("Q")
                         .font(.caption)

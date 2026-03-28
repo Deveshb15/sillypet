@@ -1,5 +1,5 @@
 .build/
-OpenPet.app/
+SillyPet.app/
 .DS_Store
 *.swp
 .swiftpm/

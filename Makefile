@@ -1,5 +1,5 @@
 SWIFT_FILES := $(shell find Sources -name '*.swift')
-APP_NAME := OpenPet
+APP_NAME := SillyPet
 APP_BUNDLE := $(APP_NAME).app
 BUILD_DIR := .build/release
 
@@ -16,12 +16,12 @@ bundle: build
 	@mkdir -p "$(APP_BUNDLE)/Contents/Resources"
 	@cp "$(BUILD_DIR)/$(APP_NAME)" "$(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/Info.plist "$(APP_BUNDLE)/Contents/"
-	@cp Resources/openpet-hook.sh "$(APP_BUNDLE)/Contents/Resources/"
-	@chmod +x "$(APP_BUNDLE)/Contents/Resources/openpet-hook.sh"
+	@cp Resources/sillypet-hook.sh "$(APP_BUNDLE)/Contents/Resources/"
+	@chmod +x "$(APP_BUNDLE)/Contents/Resources/sillypet-hook.sh"
 	@echo "Built $(APP_BUNDLE)"
 
 run: bundle
-	@echo "Launching OpenPet..."
+	@echo "Launching SillyPet..."
 	@open "$(APP_BUNDLE)"
 
 clean:
@@ -46,6 +46,6 @@ compile:
 		-target arm64-apple-macos14.0 \
 		-O
 	@cp Resources/Info.plist "$(APP_BUNDLE)/Contents/"
-	@cp Resources/openpet-hook.sh "$(APP_BUNDLE)/Contents/Resources/"
-	@chmod +x "$(APP_BUNDLE)/Contents/Resources/openpet-hook.sh"
+	@cp Resources/sillypet-hook.sh "$(APP_BUNDLE)/Contents/Resources/"
+	@chmod +x "$(APP_BUNDLE)/Contents/Resources/sillypet-hook.sh"
 	@echo "Compiled $(APP_BUNDLE)"

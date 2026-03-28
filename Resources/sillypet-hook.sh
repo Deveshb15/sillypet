@@ -1,12 +1,12 @@
 #!/bin/bash
-# OpenPet hook script for Claude Code
-# Installed in ~/.claude/settings.json to forward events to OpenPet
+# SillyPet hook script for Claude Code
+# Installed in ~/.claude/settings.json to forward events to SillyPet
 #
-# Usage: openpet-hook.sh <event_type>
+# Usage: sillypet-hook.sh <event_type>
 # Reads JSON context from stdin (provided by Claude Code hooks)
 
 EVENT_TYPE="$1"
-EVENT_DIR="/tmp/openpet-events"
+EVENT_DIR="/tmp/sillypet-events"
 mkdir -p "$EVENT_DIR"
 
 # Read hook JSON from stdin

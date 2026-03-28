@@ -7,7 +7,7 @@ class ClaudeMonitor: AgentMonitor {
     var onEvent: ((AgentEvent) -> Void)?
 
     // Hook-based monitoring
-    private let eventDir = "/tmp/openpet-events"
+    private let eventDir = "/tmp/sillypet-events"
     private var dirFD: Int32 = -1
     private var dirSource: DispatchSourceFileSystemObject?
 
@@ -267,8 +267,8 @@ class ClaudeMonitor: AgentMonitor {
             settings = existing
         }
 
-        let hookScript = Bundle.main.resourcePath.map { "\($0)/openpet-hook.sh" }
-            ?? "\(eventDir)/../openpet-hook.sh"
+        let hookScript = Bundle.main.resourcePath.map { "\($0)/sillypet-hook.sh" }
+            ?? "\(eventDir)/../sillypet-hook.sh"
 
         let makeEntry: (String) -> [String: Any] = { arg in
             ["matcher": [String: Any](), "hooks": [["type": "command", "command": "\(hookScript) \(arg)"]]] as [String: Any]
@@ -288,7 +288,7 @@ class ClaudeMonitor: AgentMonitor {
         for (name, arg) in events {
             var list = hooks[name] as? [[String: Any]] ?? []
             let installed = list.contains { e in
-                (e["hooks"] as? [[String: Any]] ?? []).contains { ($0["command"] as? String)?.contains("openpet") == true }
+                (e["hooks"] as? [[String: Any]] ?? []).contains { ($0["command"] as? String)?.contains("sillypet") == true }
             }
             if !installed {
                 list.append(makeEntry(arg))

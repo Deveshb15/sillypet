@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenPet",
+    name: "SillyPet",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "OpenPet",
-            path: "Sources/OpenPet"
+            name: "SillyPet",
+            path: "Sources/SillyPet"
         )
     ]
 )

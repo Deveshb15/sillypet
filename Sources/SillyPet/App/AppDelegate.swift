@@ -21,7 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // Start monitors
         startMonitors()
 
-        print("[OpenPet] Running! Your Shiba Inu is now on screen.")
+        print("[SillyPet] Running! Your Shiba Inu is now on screen.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -51,7 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         eventLog.append(logEntry)
         if eventLog.count > 50 { eventLog.removeFirst() }
 
-        print("[OpenPet] \(logEntry)")
+        print("[SillyPet] \(logEntry)")
 
         // Update session tracking
         updateSession(for: event)
