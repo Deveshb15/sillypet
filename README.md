@@ -41,9 +41,7 @@ After delivering a notification, the dog walks back to the side of the screen an
 
 > **macOS may block the app** since it isn't notarized (this is normal for open-source apps). To fix:
 >
-> Go to **System Settings** → **Privacy & Security** → scroll down → click **Open Anyway** next to SillyPet
->
-> Or run in Terminal: `xattr -cr /Applications/SillyPet.app`
+> **System Settings** → **Privacy & Security** → scroll down to **Security** → click **"Open Anyway"** next to SillyPet
 
 ## Build from source
 

@@ -53,20 +53,19 @@ text.draw(at: NSPoint(x: textX, y: arrowY - 32), withAttributes: textAttrs)
 
 // Gatekeeper note at bottom
 let noteLines = [
-    "If macOS blocks the app: System Settings \u{2192} Privacy & Security \u{2192} Open Anyway",
-    "Or run:  xattr -cr /Applications/SillyPet.app",
+    "If macOS blocks the app:",
+    "System Settings \u{2192} Privacy & Security \u{2192} Scroll to Security \u{2192} Click \"Open Anyway\"",
 ]
-let noteFont = NSFont.systemFont(ofSize: 11, weight: .regular)
-let noteColor = NSColor(white: 1.0, alpha: 0.3)
 
 for (i, line) in noteLines.enumerated() {
+    let isHeader = i == 0
     let attrs: [NSAttributedString.Key: Any] = [
-        .font: noteFont,
-        .foregroundColor: noteColor,
+        .font: NSFont.systemFont(ofSize: isHeader ? 11.5 : 11, weight: isHeader ? .medium : .regular),
+        .foregroundColor: NSColor(white: 1.0, alpha: isHeader ? 0.45 : 0.3),
     ]
     let sz = line.size(withAttributes: attrs)
     let x = (width - sz.width) / 2
-    let y: CGFloat = 45 - CGFloat(i) * 18
+    let y: CGFloat = 50 - CGFloat(i) * 20
     line.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
 }
 
