@@ -18,16 +18,32 @@ bundle: build
 	@cp Resources/Info.plist "$(APP_BUNDLE)/Contents/"
 	@cp Resources/sillypet-hook.sh "$(APP_BUNDLE)/Contents/Resources/"
 	@chmod +x "$(APP_BUNDLE)/Contents/Resources/sillypet-hook.sh"
+	@if [ -f Resources/SillyPet.icns ]; then cp Resources/SillyPet.icns "$(APP_BUNDLE)/Contents/Resources/"; fi
+	@codesign --force --deep --sign - "$(APP_BUNDLE)" 2>/dev/null || true
 	@echo "Built $(APP_BUNDLE)"
 
 run: bundle
 	@echo "Launching SillyPet..."
 	@open "$(APP_BUNDLE)"
 
+dmg: bundle
+	@echo "Creating DMG..."
+	@rm -rf dmg_staging SillyPet.dmg
+	@mkdir -p dmg_staging
+	@cp -R "$(APP_BUNDLE)" dmg_staging/
+	@ln -s /Applications dmg_staging/Applications
+	@hdiutil create -volname "SillyPet" -srcfolder dmg_staging \
+		-ov -format UDZO -fs HFS+ \
+		-imagekey zlib-level=9 \
+		SillyPet.dmg
+	@rm -rf dmg_staging
+	@echo "Created SillyPet.dmg"
+
 clean:
 	swift package clean
 	rm -rf "$(APP_BUNDLE)"
 	rm -rf .build
+	rm -rf dmg_staging
 
 # Development: build and run without creating a bundle
 dev:

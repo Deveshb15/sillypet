@@ -1,5 +1,9 @@
 .build/
 SillyPet.app/
+SillyPet.dmg
+dmg_staging/
 .DS_Store
 *.swp
 .swiftpm/
+Resources/SillyPet.iconset/
+Resources/icon_1024.png

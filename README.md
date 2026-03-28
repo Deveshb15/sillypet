@@ -33,7 +33,16 @@ After delivering a notification, the dog walks back to the side of the screen an
 
 **Codex** — tails JSONL session files in `~/.codex/sessions/YYYY/MM/DD/` and parses events: `task_started`, `task_complete`, `agent_message`, `function_call`, `turn_aborted`.
 
-## Build & run
+## Install
+
+1. Download `SillyPet.dmg` from the [latest release](https://github.com/Deveshb15/sillypet/releases/latest)
+2. Open the DMG and drag `SillyPet.app` to **Applications**
+3. **Important**: Since the app isn't notarized, macOS may block it. To open:
+   - Right-click `SillyPet.app` → **Open** → click **Open** in the dialog
+   - Or run: `xattr -cr /Applications/SillyPet.app`
+4. Pick your pet on first launch!
+
+## Build from source
 
 Requires macOS 14+ and Swift 5.9+.
 
@@ -44,11 +53,12 @@ make
 # Build and launch
 make run
 
+# Create a DMG for distribution
+make dmg
+
 # Development (debug build, runs directly)
 make dev
 ```
-
-This creates `SillyPet.app` in the project directory. You can also move it to `/Applications/`.
 
 ## Project structure
 
