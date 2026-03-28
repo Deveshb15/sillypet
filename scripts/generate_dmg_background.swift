@@ -8,44 +8,46 @@ let height: CGFloat = 440
 let image = NSImage(size: NSSize(width: width, height: height))
 image.lockFocus()
 
-// Dark background
+// Light background
 let bgGradient = NSGradient(colors: [
-    NSColor(red: 24/255, green: 24/255, blue: 38/255, alpha: 1),
-    NSColor(red: 32/255, green: 32/255, blue: 52/255, alpha: 1),
+    NSColor(red: 245/255, green: 245/255, blue: 247/255, alpha: 1),
+    NSColor(red: 235/255, green: 235/255, blue: 240/255, alpha: 1),
 ])!
 bgGradient.draw(in: NSRect(x: 0, y: 0, width: width, height: height), angle: -90)
 
 // Arrow settings
 let arrowY: CGFloat = height / 2 + 15
-let arrowStartX: CGFloat = 225
-let arrowEndX: CGFloat = 435
-let arrowColor = NSColor(white: 1.0, alpha: 0.35)
+let arrowStartX: CGFloat = 255
+let arrowEndX: CGFloat = 405
+let arrowColor = NSColor(white: 0.0, alpha: 0.18)
 
 // Draw dashed arrow shaft
 let shaft = NSBezierPath()
 shaft.move(to: NSPoint(x: arrowStartX, y: arrowY))
-shaft.line(to: NSPoint(x: arrowEndX - 15, y: arrowY))
+shaft.line(to: NSPoint(x: arrowEndX - 10, y: arrowY))
 arrowColor.setStroke()
-shaft.lineWidth = 3
-shaft.setLineDash([8, 6], count: 2, phase: 0)
+shaft.lineWidth = 1.5
+shaft.setLineDash([6, 5], count: 2, phase: 0)
 shaft.lineCapStyle = .round
 shaft.stroke()
 
-// Draw arrow head (filled triangle)
-let headSize: CGFloat = 16
+// Draw arrow head (chevron ">")
+let headSize: CGFloat = 7
 let head = NSBezierPath()
-head.move(to: NSPoint(x: arrowEndX, y: arrowY))
-head.line(to: NSPoint(x: arrowEndX - headSize, y: arrowY + headSize * 0.65))
-head.line(to: NSPoint(x: arrowEndX - headSize, y: arrowY - headSize * 0.65))
-head.close()
-arrowColor.setFill()
-head.fill()
+head.move(to: NSPoint(x: arrowEndX - headSize, y: arrowY + headSize))
+head.line(to: NSPoint(x: arrowEndX, y: arrowY))
+head.line(to: NSPoint(x: arrowEndX - headSize, y: arrowY - headSize))
+head.lineWidth = 1.5
+head.lineCapStyle = .round
+head.lineJoinStyle = .round
+arrowColor.setStroke()
+head.stroke()
 
 // "Drag to install" text
 let text = "Drag to Applications to install"
 let textAttrs: [NSAttributedString.Key: Any] = [
     .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-    .foregroundColor: NSColor(white: 1.0, alpha: 0.45),
+    .foregroundColor: NSColor(white: 0.0, alpha: 0.4),
 ]
 let textSize = text.size(withAttributes: textAttrs)
 let textX = (width - textSize.width) / 2
@@ -61,11 +63,11 @@ for (i, line) in noteLines.enumerated() {
     let isHeader = i == 0
     let attrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: isHeader ? 11.5 : 11, weight: isHeader ? .medium : .regular),
-        .foregroundColor: NSColor(white: 1.0, alpha: isHeader ? 0.45 : 0.3),
+        .foregroundColor: NSColor(white: 0.0, alpha: isHeader ? 0.4 : 0.25),
     ]
     let sz = line.size(withAttributes: attrs)
     let x = (width - sz.width) / 2
-    let y: CGFloat = 50 - CGFloat(i) * 20
+    let y: CGFloat = 70 - CGFloat(i) * 20
     line.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
 }
 
