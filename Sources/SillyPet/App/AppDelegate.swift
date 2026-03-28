@@ -2,7 +2,7 @@ import AppKit
 import Combine
 
 class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
-    static let shared = AppDelegate()
+    static var shared: AppDelegate!
 
     @Published var pets: [Pet] = []
     @Published var sessions: [AgentSession] = []
@@ -10,6 +10,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private var claudeMonitor: ClaudeMonitor?
     private var codexMonitor: CodexMonitor?
+
+    override init() {
+        super.init()
+        AppDelegate.shared = self
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
