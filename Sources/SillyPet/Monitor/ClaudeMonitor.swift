@@ -22,6 +22,13 @@ class ClaudeMonitor: AgentMonitor {
     // transcript activity follows, fire permissionRequest to alert the user
     private var pendingAttention: [String: (timer: Timer, message: String, toolName: String?)] = [:]
 
+    // Deferred lifecycle events: grace periods to avoid false positives during phase transitions
+    private var pendingSessionEnd: [String: Timer] = [:]
+    private var pendingTaskCompleted: [String: (timer: Timer, message: String, sessionId: String?)] = [:]
+    private var recentSessionIds: [String: Date] = [:]
+    private let sessionEndGracePeriod: TimeInterval = 5.0
+    private let taskCompletedGracePeriod: TimeInterval = 4.0
+
     // Debounce: don't fire duplicate events too quickly
     private var lastEventKind: AgentEventKind?
     private var lastEventTime: Date = .distantPast
@@ -45,6 +52,11 @@ class ClaudeMonitor: AgentMonitor {
         pollTimer = nil
         for (_, pending) in pendingAttention { pending.timer.invalidate() }
         pendingAttention.removeAll()
+        for (_, timer) in pendingSessionEnd { timer.invalidate() }
+        pendingSessionEnd.removeAll()
+        for (_, pending) in pendingTaskCompleted { pending.timer.invalidate() }
+        pendingTaskCompleted.removeAll()
+        recentSessionIds.removeAll()
         if dirFD >= 0 { close(dirFD); dirFD = -1 }
     }
 
@@ -77,8 +89,21 @@ class ClaudeMonitor: AgentMonitor {
 
             if !knownSessions.contains(sessionId) {
                 knownSessions.insert(sessionId)
-                let name = json["name"] as? String
-                fireEvent(.sessionStart, message: name ?? "Claude session started", sessionId: sessionId)
+
+                // Check if this session reappeared during a grace period (phase transition)
+                if let pendingEnd = pendingSessionEnd.removeValue(forKey: sessionId) {
+                    pendingEnd.invalidate()
+                    recentSessionIds.removeValue(forKey: sessionId)
+                    // Session never really ended — suppress both end and start
+                } else if let lastSeen = recentSessionIds[sessionId],
+                          Date().timeIntervalSince(lastSeen) < sessionEndGracePeriod {
+                    recentSessionIds.removeValue(forKey: sessionId)
+                    // Same session recycled quickly — phase boundary, suppress start
+                } else {
+                    // Genuinely new session
+                    let name = json["name"] as? String
+                    fireEvent(.sessionStart, message: name ?? "Claude session started", sessionId: sessionId)
+                }
             }
 
             let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
@@ -93,7 +118,8 @@ class ClaudeMonitor: AgentMonitor {
         for sessionId in ended {
             knownSessions.remove(sessionId)
             cancelAttentionTimer(sessionId: sessionId)
-            fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
+            recentSessionIds[sessionId] = Date()
+            scheduleSessionEnd(sessionId: sessionId)
         }
     }
 
@@ -129,6 +155,9 @@ class ClaudeMonitor: AgentMonitor {
             // Any new transcript entry means the session is progressing.
             // Cancel pending attention timer (tool auto-approved or user responded).
             cancelAttentionTimer(sessionId: sessionId)
+            // Cancel pending taskCompleted — new activity means the previous
+            // task_completed was an intermediate phase, not the final one.
+            cancelPendingTaskCompleted(key: sessionId)
 
             parseTranscriptEntry(json, sessionId: sessionId)
         }
@@ -189,13 +218,63 @@ class ClaudeMonitor: AgentMonitor {
         }
     }
 
+    // MARK: - Deferred Lifecycle Events (grace periods)
+
+    private func scheduleSessionEnd(sessionId: String) {
+        pendingSessionEnd[sessionId]?.invalidate()
+
+        let timer = Timer.scheduledTimer(withTimeInterval: sessionEndGracePeriod, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.pendingSessionEnd.removeValue(forKey: sessionId)
+            self.recentSessionIds.removeValue(forKey: sessionId)
+            self.cancelPendingTaskCompleted(key: sessionId)
+            self.fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
+        }
+        pendingSessionEnd[sessionId] = timer
+    }
+
+    private func scheduleTaskCompleted(sessionId: String?, message: String) {
+        let key = sessionId ?? "unknown"
+        cancelPendingTaskCompleted(key: key)
+
+        let timer = Timer.scheduledTimer(withTimeInterval: taskCompletedGracePeriod, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.pendingTaskCompleted.removeValue(forKey: key)
+            self.fireEvent(.taskCompleted, message: message, sessionId: sessionId)
+        }
+        pendingTaskCompleted[key] = (timer: timer, message: message, sessionId: sessionId)
+    }
+
+    private func cancelPendingTaskCompleted(key: String) {
+        if let pending = pendingTaskCompleted.removeValue(forKey: key) {
+            pending.timer.invalidate()
+        }
+    }
+
     // MARK: - Event Dispatch
 
     private func fireEvent(_ kind: AgentEventKind, message: String, sessionId: String? = nil, toolName: String? = nil) {
         let now = Date()
-        if kind == lastEventKind && now.timeIntervalSince(lastEventTime) < 3.0 {
+        let elapsed = now.timeIntervalSince(lastEventTime)
+
+        // Same-kind debounce
+        if kind == lastEventKind && elapsed < 3.0 {
             return
         }
+
+        // Sequence debounce: suppress rapid lifecycle event flurries
+        let suppressedSequences: [(AgentEventKind, AgentEventKind, TimeInterval)] = [
+            (.taskCompleted, .sessionEnd, 5.0),
+            (.sessionEnd, .sessionStart, 5.0),
+            (.taskCompleted, .sessionStart, 5.0),
+            (.sessionStart, .taskCompleted, 3.0),
+        ]
+        for (prev, suppressed, window) in suppressedSequences {
+            if lastEventKind == prev && kind == suppressed && elapsed < window {
+                return
+            }
+        }
+
         lastEventKind = kind
         lastEventTime = now
 
@@ -274,14 +353,37 @@ class ClaudeMonitor: AgentMonitor {
             return nil
 
         case "task_completed":
-            return AgentEvent(source: .claude, kind: .taskCompleted, sessionId: sessionId,
-                              message: hookData["task_subject"] as? String ?? "Task completed")
+            // Defer: if new activity follows within grace period, this was intermediate
+            DispatchQueue.main.async { [weak self] in
+                self?.scheduleTaskCompleted(
+                    sessionId: sessionId,
+                    message: hookData["task_subject"] as? String ?? "Task completed"
+                )
+            }
+            return nil
 
         case "session_start":
-            return AgentEvent(source: .claude, kind: .sessionStart, sessionId: sessionId, message: "Session started")
+            // Let JSONL scan handle session starts (it has grace period logic).
+            // Only fire for genuinely unknown sessions.
+            if let sid = sessionId, recentSessionIds[sid] != nil {
+                DispatchQueue.main.async { [weak self] in
+                    self?.pendingSessionEnd[sid]?.invalidate()
+                    self?.pendingSessionEnd.removeValue(forKey: sid)
+                    self?.recentSessionIds.removeValue(forKey: sid)
+                }
+                return nil
+            }
+            return nil  // Let JSONL scan handle it
 
         case "session_end":
-            return AgentEvent(source: .claude, kind: .sessionEnd, sessionId: sessionId, message: "Session ended")
+            // Defer through grace period (same as JSONL path)
+            if let sid = sessionId {
+                DispatchQueue.main.async { [weak self] in
+                    self?.recentSessionIds[sid] = Date()
+                    self?.scheduleSessionEnd(sessionId: sid)
+                }
+            }
+            return nil
 
         case "stop":
             // Stop hook fires when the model's turn ends.
@@ -369,7 +471,7 @@ class ClaudeMonitor: AgentMonitor {
             }
 
             let entry: [String: Any] = [
-                "matcher": [String: Any](),
+                "matcher": "",
                 "hooks": [["type": "command", "command": correctCommand]]
             ]
 
