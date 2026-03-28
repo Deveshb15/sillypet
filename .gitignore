@@ -1,0 +1,5 @@
+.build/
+OpenPet.app/
+.DS_Store
+*.swp
+.swiftpm/
