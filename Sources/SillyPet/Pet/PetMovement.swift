@@ -68,9 +68,9 @@ class PetMovement {
         velocity = .zero
     }
 
-    /// Random point along the bottom edges of the screen (left or right side)
+    /// Random point along the bottom edges of the pet's current screen (left or right side)
     func randomScreenTarget() -> CGPoint {
-        guard let screen = NSScreen.main else {
+        guard let screen = currentScreen() else {
             return CGPoint(x: 400, y: 100)
         }
 
@@ -88,9 +88,9 @@ class PetMovement {
         return CGPoint(x: x, y: y)
     }
 
-    /// A point on the nearest screen edge (for retreating after notifications)
+    /// A point on the nearest edge of the pet's current screen (for retreating after notifications)
     func nearestScreenEdge() -> CGPoint {
-        guard let screen = NSScreen.main else {
+        guard let screen = currentScreen() else {
             return CGPoint(x: 50, y: 50)
         }
 
@@ -115,8 +115,48 @@ class PetMovement {
         return CGPoint(x: mouse.x - 40, y: mouse.y - 60)
     }
 
+    // MARK: - Multi-screen helpers
+
+    /// The screen the pet is currently on (or nearest to)
+    private func currentScreen() -> NSScreen? {
+        let petCenter = CGPoint(x: position.x + 40, y: position.y + 40)
+        return screenContaining(petCenter) ?? nearestScreen(to: petCenter) ?? NSScreen.main
+    }
+
+    /// Find the screen whose visible frame contains a given point
+    private func screenContaining(_ point: CGPoint) -> NSScreen? {
+        return NSScreen.screens.first { $0.visibleFrame.contains(point) }
+    }
+
+    /// Find the screen nearest to a given point (by distance to its visible frame)
+    private func nearestScreen(to point: CGPoint) -> NSScreen? {
+        return NSScreen.screens.min(by: {
+            distanceToFrame($0.visibleFrame, from: point) < distanceToFrame($1.visibleFrame, from: point)
+        })
+    }
+
+    /// Shortest distance from a point to a rectangle (0 if inside)
+    private func distanceToFrame(_ frame: CGRect, from point: CGPoint) -> CGFloat {
+        let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+        let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+        return sqrt(dx * dx + dy * dy)
+    }
+
     private func clampToScreen() {
-        guard let screen = NSScreen.main else { return }
+        let petCenter = CGPoint(x: position.x + 40, y: position.y + 40)
+        let petScreen = screenContaining(petCenter)
+
+        // If the pet is crossing between screens (target on a different screen,
+        // or pet is in the gap between screens), allow free movement
+        if let target = target {
+            let targetScreen = screenContaining(target)
+            if petScreen == nil || (targetScreen != nil && targetScreen !== petScreen) {
+                return
+            }
+        }
+
+        // Normal clamping: use the screen the pet is on, or the nearest one
+        guard let screen = petScreen ?? nearestScreen(to: petCenter) else { return }
         let frame = screen.visibleFrame
 
         position.x = max(frame.minX + screenPadding, min(frame.maxX - screenPadding - 80, position.x))

@@ -18,6 +18,10 @@ class ClaudeMonitor: AgentMonitor {
     private var knownSessions: Set<String> = []
     private var pollTimer: Timer?
 
+    // Permission detection: when stop_reason=tool_use appears and no new
+    // transcript activity follows within 4 seconds, fire permissionRequest
+    private var pendingPermissions: [String: (timer: Timer, toolName: String?)] = [:]
+
     // Debounce: don't fire duplicate events too quickly
     private var lastEventKind: AgentEventKind?
     private var lastEventTime: Date = .distantPast
@@ -28,15 +32,9 @@ class ClaudeMonitor: AgentMonitor {
     }
 
     func start() {
-        // 1. Start hook-based monitoring
         startHookMonitor()
-
-        // 2. Start JSONL transcript monitoring (the reliable method)
         startTranscriptMonitor()
-
-        // 3. Install hooks for future sessions
         installHooksIfNeeded()
-
         print("[ClaudeMonitor] Started (hooks + JSONL transcript monitoring)")
     }
 
@@ -45,24 +43,22 @@ class ClaudeMonitor: AgentMonitor {
         dirSource = nil
         pollTimer?.invalidate()
         pollTimer = nil
+        for (_, pending) in pendingPermissions { pending.timer.invalidate() }
+        pendingPermissions.removeAll()
         if dirFD >= 0 { close(dirFD); dirFD = -1 }
     }
 
     // MARK: - JSONL Transcript Monitoring
 
     private func startTranscriptMonitor() {
-        // Poll every 2 seconds: check active sessions and tail their transcripts
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.scanActiveSessions()
         }
-        // Initial scan
         scanActiveSessions()
     }
 
     private func scanActiveSessions() {
         let fm = FileManager.default
-
-        // Read active session files from ~/.claude/sessions/*.json
         guard let sessionFiles = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
 
         var activePIDs = Set<String>()
@@ -79,14 +75,12 @@ class ClaudeMonitor: AgentMonitor {
 
             activePIDs.insert(sessionId)
 
-            // Detect new sessions
             if !knownSessions.contains(sessionId) {
                 knownSessions.insert(sessionId)
                 let name = json["name"] as? String
                 fireEvent(.sessionStart, message: name ?? "Claude session started", sessionId: sessionId)
             }
 
-            // Find the transcript JSONL for this session
             let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
             let transcriptPath = "\(projectsDir)/\(encodedCwd)/\(sessionId).jsonl"
 
@@ -95,10 +89,10 @@ class ClaudeMonitor: AgentMonitor {
             }
         }
 
-        // Detect ended sessions
         let ended = knownSessions.subtracting(activePIDs)
         for sessionId in ended {
             knownSessions.remove(sessionId)
+            cancelPermissionTimer(sessionId: sessionId)
             fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
         }
     }
@@ -107,7 +101,6 @@ class ClaudeMonitor: AgentMonitor {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let fileSize = attrs[.size] as? UInt64 else { return }
 
-        // First time: skip to near the end (last 2KB) to avoid replaying history
         if transcriptOffsets[path] == nil {
             transcriptOffsets[path] = fileSize > 2048 ? fileSize - 2048 : 0
             return
@@ -133,6 +126,10 @@ class ClaudeMonitor: AgentMonitor {
                 continue
             }
 
+            // Any new transcript entry means the session is progressing.
+            // If a tool_use was pending permission, the tool was auto-approved.
+            cancelPermissionTimer(sessionId: sessionId)
+
             parseTranscriptEntry(json, sessionId: sessionId)
         }
     }
@@ -142,31 +139,53 @@ class ClaudeMonitor: AgentMonitor {
 
         guard type == "assistant" else { return }
 
-        // Get stop_reason from the message object
         let message = json["message"] as? [String: Any] ?? [:]
         let stopReason = message["stop_reason"] as? String ?? ""
 
         switch stopReason {
         case "end_turn":
-            // Claude finished responding — task is done, waiting for user input
             fireEvent(.taskCompleted, message: "Claude finished", sessionId: sessionId)
 
         case "tool_use":
-            // Claude wants to use a tool — might be asking for permission
-            // Extract tool name from content
             let content = message["content"] as? [[String: Any]] ?? []
             let toolUse = content.first { ($0["type"] as? String) == "tool_use" }
             let toolName = toolUse?["name"] as? String
 
             fireEvent(.working, message: "Using \(toolName ?? "tool")", sessionId: sessionId, toolName: toolName)
 
+            // Start permission detection: if no new transcript activity within
+            // 4 seconds, the tool likely needs user permission
+            startPermissionTimer(sessionId: sessionId, toolName: toolName)
+
         default:
             break
         }
     }
 
+    // MARK: - Permission Detection Timer
+
+    private func startPermissionTimer(sessionId: String, toolName: String?) {
+        cancelPermissionTimer(sessionId: sessionId)
+
+        let timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.pendingPermissions.removeValue(forKey: sessionId)
+            self.fireEvent(.permissionRequest,
+                          message: "Needs permission for \(toolName ?? "tool")",
+                          sessionId: sessionId, toolName: toolName)
+        }
+        pendingPermissions[sessionId] = (timer: timer, toolName: toolName)
+    }
+
+    private func cancelPermissionTimer(sessionId: String) {
+        if let pending = pendingPermissions.removeValue(forKey: sessionId) {
+            pending.timer.invalidate()
+        }
+    }
+
+    // MARK: - Event Dispatch
+
     private func fireEvent(_ kind: AgentEventKind, message: String, sessionId: String? = nil, toolName: String? = nil) {
-        // Debounce: don't fire the same event type within 3 seconds
         let now = Date()
         if kind == lastEventKind && now.timeIntervalSince(lastEventTime) < 3.0 {
             return
@@ -232,10 +251,18 @@ class ClaudeMonitor: AgentMonitor {
 
         switch typeStr {
         case "notification":
+            // Notification hook — check for permission/idle prompts
             let nt = hookData["notification_type"] as? String
-            if nt == "permission_prompt" || nt == "idle_prompt" {
+            let title = hookData["title"] as? String ?? ""
+            let body = hookData["body"] as? String ?? ""
+            // Match permission_prompt, idle_prompt, or notification text about permissions
+            if nt == "permission_prompt" || nt == "idle_prompt"
+                || title.lowercased().contains("permission")
+                || body.lowercased().contains("permission")
+                || title.lowercased().contains("waiting")
+                || body.lowercased().contains("proceed") {
                 return AgentEvent(source: .claude, kind: .permissionRequest, sessionId: sessionId,
-                                  message: hookData["message"] as? String ?? "Permission needed",
+                                  message: hookData["message"] as? String ?? body,
                                   toolName: hookData["tool_name"] as? String)
             }
             return nil
@@ -247,31 +274,71 @@ class ClaudeMonitor: AgentMonitor {
         case "session_start":
             return AgentEvent(source: .claude, kind: .sessionStart, sessionId: sessionId, message: "Session started")
 
-        case "session_end", "stop":
+        case "session_end":
             return AgentEvent(source: .claude, kind: .sessionEnd, sessionId: sessionId, message: "Session ended")
+
+        case "stop":
+            // Stop hook fires when the model's turn ends.
+            // If it contains tool_use content, permission is needed.
+            let stopReason = hookData["stop_reason"] as? String
+            let message = hookData["message"] as? [String: Any]
+            let content = (message?["content"] as? [[String: Any]])
+                ?? (hookData["content"] as? [[String: Any]])
+                ?? []
+            let toolUse = content.first { ($0["type"] as? String) == "tool_use" }
+
+            if stopReason == "tool_use" || toolUse != nil {
+                let toolName = toolUse?["name"] as? String
+                return AgentEvent(source: .claude, kind: .permissionRequest, sessionId: sessionId,
+                                  message: "Permission needed for \(toolName ?? "tool")",
+                                  toolName: toolName)
+            }
+            // Non-tool stop is just the model finishing — not a session end
+            return nil
+
+        case "pre_tool_use":
+            // PreToolUse fires for all tools — treat as working signal
+            let toolName = hookData["tool_name"] as? String
+            return AgentEvent(source: .claude, kind: .working, sessionId: sessionId,
+                              message: "Using \(toolName ?? "tool")", toolName: toolName)
 
         default:
             return nil
         }
     }
 
-    // MARK: - Hook Installation (for future sessions)
+    // MARK: - Hook Installation
 
     private func installHooksIfNeeded() {
         let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
+        let hooksDir = NSHomeDirectory() + "/.claude/hooks"
+        let stableScriptPath = hooksDir + "/sillypet-hook.sh"
         let fm = FileManager.default
 
+        // Always install/update the hook script at a stable location
+        try? fm.createDirectory(atPath: hooksDir, withIntermediateDirectories: true)
+
+        let scriptContent = """
+        #!/bin/bash
+        EVENT_TYPE="$1"
+        EVENT_DIR="/tmp/sillypet-events"
+        mkdir -p "$EVENT_DIR"
+        INPUT=""
+        if [ ! -t 0 ]; then INPUT=$(cat); fi
+        if [ -z "$INPUT" ]; then INPUT="{}"; fi
+        TIMESTAMP=$(date +%s%N 2>/dev/null || date +%s)
+        EVENT_FILE="$EVENT_DIR/${TIMESTAMP}_${EVENT_TYPE}.json"
+        printf '{"source":"claude","type":"%s","data":%s,"ts":"%s"}' "$EVENT_TYPE" "$INPUT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$EVENT_FILE"
+        exit 0
+        """
+        try? scriptContent.write(toFile: stableScriptPath, atomically: true, encoding: .utf8)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stableScriptPath)
+
+        // Read current settings
         var settings: [String: Any] = [:]
         if let data = fm.contents(atPath: settingsPath),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             settings = existing
-        }
-
-        let hookScript = Bundle.main.resourcePath.map { "\($0)/sillypet-hook.sh" }
-            ?? "\(eventDir)/../sillypet-hook.sh"
-
-        let makeEntry: (String) -> [String: Any] = { arg in
-            ["matcher": [String: Any](), "hooks": [["type": "command", "command": "\(hookScript) \(arg)"]]] as [String: Any]
         }
 
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
@@ -282,16 +349,35 @@ class ClaudeMonitor: AgentMonitor {
             ("SessionStart", "session_start"),
             ("SessionEnd", "session_end"),
             ("Stop", "stop"),
+            ("PreToolUse", "pre_tool_use"),
         ]
 
         var changed = false
         for (name, arg) in events {
             var list = hooks[name] as? [[String: Any]] ?? []
-            let installed = list.contains { e in
+            let correctCommand = "\(stableScriptPath) \(arg)"
+
+            // Find existing sillypet hook entry
+            let existingIdx = list.firstIndex { e in
                 (e["hooks"] as? [[String: Any]] ?? []).contains { ($0["command"] as? String)?.contains("sillypet") == true }
             }
-            if !installed {
-                list.append(makeEntry(arg))
+
+            let entry: [String: Any] = [
+                "matcher": [String: Any](),
+                "hooks": [["type": "command", "command": correctCommand]]
+            ]
+
+            if let idx = existingIdx {
+                // Check if path is correct; update if stale
+                let existingHooks = list[idx]["hooks"] as? [[String: Any]] ?? []
+                let existingCommand = existingHooks.first?["command"] as? String ?? ""
+                if existingCommand != correctCommand {
+                    list[idx] = entry
+                    hooks[name] = list
+                    changed = true
+                }
+            } else {
+                list.append(entry)
                 hooks[name] = list
                 changed = true
             }
@@ -300,9 +386,8 @@ class ClaudeMonitor: AgentMonitor {
         if changed {
             settings["hooks"] = hooks
             if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-                try? fm.createDirectory(atPath: NSHomeDirectory() + "/.claude", withIntermediateDirectories: true)
                 fm.createFile(atPath: settingsPath, contents: data)
-                print("[ClaudeMonitor] Hooks updated in \(settingsPath)")
+                print("[ClaudeMonitor] Hooks updated in \(settingsPath) (script at \(stableScriptPath))")
             }
         }
     }
