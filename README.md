@@ -1,14 +1,16 @@
 # SillyPet
 
-A pixel art Shiba Inu that lives on your macOS desktop and monitors your AI coding agents. When Claude Code or Codex needs your attention, the dog sprints to your cursor to let you know.
+A pixel art desktop pet that lives on your macOS screen and monitors your AI coding agents. When Claude Code or Codex needs your attention, your pet sprints to your cursor to let you know.
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+[![Download SillyPet](https://img.shields.io/badge/Download-SillyPet%20v0.1.0-brightgreen?style=for-the-badge&logo=apple)](https://github.com/Deveshb15/sillypet/releases/latest/download/SillyPet.dmg)
+
 ## What it does
 
-SillyPet is a native macOS menu bar app that runs a desktop pet — a 16x16 pixel art Shiba Inu rendered with SpriteKit. The pet monitors your Claude Code and Codex sessions in real time and reacts to what's happening:
+SillyPet is a native macOS menu bar app that runs a desktop pet — a 16x16 pixel art animal rendered with SpriteKit. Choose from 10 pets on first launch: **Shiba Inu, Cat, Rabbit, Fox, Penguin, Hamster, Owl, Frog, Duck, or Panda**. The pet monitors your Claude Code and Codex sessions in real time and reacts to what's happening:
 
 | Agent state | Pet behavior |
 |---|---|
