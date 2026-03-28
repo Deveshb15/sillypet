@@ -10,9 +10,9 @@ class CodexMonitor: AgentMonitor {
     private var watchedFiles: [String: UInt64] = [:]  // path -> last read offset
     private var pollTimer: Timer?
 
-    // Permission detection: if function_call appears and no function_call_output
-    // follows within 4 seconds, fire permissionRequest
-    private var pendingPermissions: [String: (timer: Timer, toolName: String?)] = [:]
+    // Attention detection: if function_call or agent_message appears and no
+    // follow-up within seconds, fire permissionRequest to alert the user
+    private var pendingAttention: [String: (timer: Timer, toolName: String?)] = [:]
 
     init() {
         sessionsDir = NSHomeDirectory() + "/.codex/sessions"
@@ -34,8 +34,8 @@ class CodexMonitor: AgentMonitor {
         source = nil
         pollTimer?.invalidate()
         pollTimer = nil
-        for (_, pending) in pendingPermissions { pending.timer.invalidate() }
-        pendingPermissions.removeAll()
+        for (_, pending) in pendingAttention { pending.timer.invalidate() }
+        pendingAttention.removeAll()
         if dirFD >= 0 { close(dirFD) }
     }
 
@@ -122,25 +122,29 @@ class CodexMonitor: AgentMonitor {
 
             switch msgType {
             case "task_started":
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
                 fire(AgentEvent(source: .codex, kind: .sessionStart, message: "Codex started working"))
 
             case "task_complete":
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
                 let lastMessage = payload["last_agent_message"] as? String
                 fire(AgentEvent(source: .codex, kind: .taskCompleted, message: lastMessage ?? "Task complete"))
 
             case "turn_aborted":
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
                 let reason = payload["reason"] as? String
                 fire(AgentEvent(source: .codex, kind: .error, message: reason ?? "Turn aborted"))
 
             case "agent_message":
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
                 fire(AgentEvent(source: .codex, kind: .working, message: "Codex is responding"))
+                // Codex finished responding — might be asking a question.
+                // If no new activity in 6s, alert the user.
+                startAttentionTimer(key: sessionFile, delay: 6.0,
+                                   message: "Codex needs your input", toolName: nil)
 
             case "user_message":
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
                 fire(AgentEvent(source: .codex, kind: .working, message: "Codex received prompt"))
 
             default:
@@ -157,10 +161,10 @@ class CodexMonitor: AgentMonitor {
                 let name = payload["name"] as? String
                 fire(AgentEvent(source: .codex, kind: .working, message: "Using \(name ?? "tool")", toolName: name))
                 // Start permission timer: if no output follows within 4s, it needs approval
-                startPermissionTimer(key: sessionFile, toolName: name)
+                startAttentionTimer(key: sessionFile, delay: 4.0,
+                                   message: "Needs permission for \(name ?? "tool")", toolName: name)
             } else if itemType == "function_call_output" {
-                // Tool executed — cancel pending permission
-                cancelPermissionTimer(key: sessionFile)
+                cancelAttentionTimer(key: sessionFile)
             }
             return
         }
@@ -171,28 +175,27 @@ class CodexMonitor: AgentMonitor {
         }
 
         if type == "turn_context" {
-            cancelPermissionTimer(key: sessionFile)
+            cancelAttentionTimer(key: sessionFile)
             fire(AgentEvent(source: .codex, kind: .working, message: "Codex is thinking"))
         }
     }
 
-    // MARK: - Permission Detection
+    // MARK: - Attention Timer (permission + question detection)
 
-    private func startPermissionTimer(key: String, toolName: String?) {
-        cancelPermissionTimer(key: key)
+    private func startAttentionTimer(key: String, delay: TimeInterval, message: String, toolName: String?) {
+        cancelAttentionTimer(key: key)
 
-        let timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            self.pendingPermissions.removeValue(forKey: key)
+            self.pendingAttention.removeValue(forKey: key)
             self.fire(AgentEvent(source: .codex, kind: .permissionRequest,
-                                 message: "Needs permission for \(toolName ?? "tool")",
-                                 toolName: toolName))
+                                 message: message, toolName: toolName))
         }
-        pendingPermissions[key] = (timer: timer, toolName: toolName)
+        pendingAttention[key] = (timer: timer, toolName: toolName)
     }
 
-    private func cancelPermissionTimer(key: String) {
-        if let pending = pendingPermissions.removeValue(forKey: key) {
+    private func cancelAttentionTimer(key: String) {
+        if let pending = pendingAttention.removeValue(forKey: key) {
             pending.timer.invalidate()
         }
     }

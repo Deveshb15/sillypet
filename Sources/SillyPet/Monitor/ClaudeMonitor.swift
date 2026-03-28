@@ -18,9 +18,9 @@ class ClaudeMonitor: AgentMonitor {
     private var knownSessions: Set<String> = []
     private var pollTimer: Timer?
 
-    // Permission detection: when stop_reason=tool_use appears and no new
-    // transcript activity follows within 4 seconds, fire permissionRequest
-    private var pendingPermissions: [String: (timer: Timer, toolName: String?)] = [:]
+    // Attention detection: when the agent stops (tool_use or end_turn) and no new
+    // transcript activity follows, fire permissionRequest to alert the user
+    private var pendingAttention: [String: (timer: Timer, message: String, toolName: String?)] = [:]
 
     // Debounce: don't fire duplicate events too quickly
     private var lastEventKind: AgentEventKind?
@@ -43,8 +43,8 @@ class ClaudeMonitor: AgentMonitor {
         dirSource = nil
         pollTimer?.invalidate()
         pollTimer = nil
-        for (_, pending) in pendingPermissions { pending.timer.invalidate() }
-        pendingPermissions.removeAll()
+        for (_, pending) in pendingAttention { pending.timer.invalidate() }
+        pendingAttention.removeAll()
         if dirFD >= 0 { close(dirFD); dirFD = -1 }
     }
 
@@ -92,7 +92,7 @@ class ClaudeMonitor: AgentMonitor {
         let ended = knownSessions.subtracting(activePIDs)
         for sessionId in ended {
             knownSessions.remove(sessionId)
-            cancelPermissionTimer(sessionId: sessionId)
+            cancelAttentionTimer(sessionId: sessionId)
             fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
         }
     }
@@ -127,8 +127,8 @@ class ClaudeMonitor: AgentMonitor {
             }
 
             // Any new transcript entry means the session is progressing.
-            // If a tool_use was pending permission, the tool was auto-approved.
-            cancelPermissionTimer(sessionId: sessionId)
+            // Cancel pending attention timer (tool auto-approved or user responded).
+            cancelAttentionTimer(sessionId: sessionId)
 
             parseTranscriptEntry(json, sessionId: sessionId)
         }
@@ -144,7 +144,11 @@ class ClaudeMonitor: AgentMonitor {
 
         switch stopReason {
         case "end_turn":
-            fireEvent(.taskCompleted, message: "Claude finished", sessionId: sessionId)
+            // Claude finished a turn — could be a question, task done, or just responding.
+            // Don't fire taskCompleted (that comes from the TaskCompleted hook).
+            // Instead, start a timer: if no new activity in 6s, alert the user.
+            startAttentionTimer(sessionId: sessionId, delay: 6.0,
+                               message: "Claude needs your input", toolName: nil)
 
         case "tool_use":
             let content = message["content"] as? [[String: Any]] ?? []
@@ -155,30 +159,31 @@ class ClaudeMonitor: AgentMonitor {
 
             // Start permission detection: if no new transcript activity within
             // 4 seconds, the tool likely needs user permission
-            startPermissionTimer(sessionId: sessionId, toolName: toolName)
+            startAttentionTimer(sessionId: sessionId, delay: 4.0,
+                               message: "Needs permission for \(toolName ?? "tool")", toolName: toolName)
 
         default:
             break
         }
     }
 
-    // MARK: - Permission Detection Timer
+    // MARK: - Attention Timer (permission + question detection)
 
-    private func startPermissionTimer(sessionId: String, toolName: String?) {
-        cancelPermissionTimer(sessionId: sessionId)
+    private func startAttentionTimer(sessionId: String, delay: TimeInterval, message: String, toolName: String?) {
+        cancelAttentionTimer(sessionId: sessionId)
 
-        let timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            self.pendingPermissions.removeValue(forKey: sessionId)
+            self.pendingAttention.removeValue(forKey: sessionId)
             self.fireEvent(.permissionRequest,
-                          message: "Needs permission for \(toolName ?? "tool")",
+                          message: message,
                           sessionId: sessionId, toolName: toolName)
         }
-        pendingPermissions[sessionId] = (timer: timer, toolName: toolName)
+        pendingAttention[sessionId] = (timer: timer, message: message, toolName: toolName)
     }
 
-    private func cancelPermissionTimer(sessionId: String) {
-        if let pending = pendingPermissions.removeValue(forKey: sessionId) {
+    private func cancelAttentionTimer(sessionId: String) {
+        if let pending = pendingAttention.removeValue(forKey: sessionId) {
             pending.timer.invalidate()
         }
     }
