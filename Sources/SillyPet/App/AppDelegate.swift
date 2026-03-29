@@ -137,37 +137,62 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func updateSession(for event: AgentEvent) {
         switch event.kind {
         case .sessionStart:
-            let session = AgentSession(
-                id: event.sessionId ?? UUID().uuidString,
-                type: event.source,
-                startTime: event.timestamp,
-                status: .active
-            )
-            sessions.append(session)
+            upsertSession(for: event, status: .active)
 
         case .sessionEnd:
-            if let idx = sessions.lastIndex(where: { $0.type == event.source && $0.status.label == "Working" }) {
+            if let idx = sessionIndex(for: event) {
                 sessions[idx].status = .idle
             }
 
         case .permissionRequest:
-            if let idx = sessions.lastIndex(where: { $0.type == event.source }) {
-                sessions[idx].status = .waitingForPermission(tool: event.toolName)
-            }
+            upsertSession(for: event, status: .waitingForPermission(tool: event.toolName))
 
         case .taskCompleted:
-            if let idx = sessions.lastIndex(where: { $0.type == event.source }) {
+            if let idx = sessionIndex(for: event) {
                 sessions[idx].status = .completed
+            } else {
+                upsertSession(for: event, status: .completed)
             }
 
         case .error:
-            if let idx = sessions.lastIndex(where: { $0.type == event.source }) {
+            if let idx = sessionIndex(for: event) {
                 sessions[idx].status = .error(event.message ?? "Unknown error")
+            } else {
+                upsertSession(for: event, status: .error(event.message ?? "Unknown error"))
             }
 
-        default:
-            break
+        case .working:
+            upsertSession(for: event, status: .active)
+
+        case .toolUse:
+            if let idx = sessionIndex(for: event) {
+                sessions[idx].status = .active
+            }
         }
+    }
+
+    private func upsertSession(for event: AgentEvent, status: AgentSession.SessionStatus) {
+        if let idx = sessionIndex(for: event) {
+            sessions[idx].status = status
+            return
+        }
+
+        let session = AgentSession(
+            id: event.sessionId ?? UUID().uuidString,
+            type: event.source,
+            startTime: event.timestamp,
+            status: status
+        )
+        sessions.append(session)
+    }
+
+    private func sessionIndex(for event: AgentEvent) -> Int? {
+        if let sessionId = event.sessionId,
+           let idx = sessions.lastIndex(where: { $0.id == sessionId && $0.type == event.source }) {
+            return idx
+        }
+
+        return sessions.lastIndex(where: { $0.type == event.source })
     }
 
     private func playNotificationSound(for kind: AgentEventKind) {

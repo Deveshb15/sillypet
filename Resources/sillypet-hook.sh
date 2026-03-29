@@ -20,12 +20,15 @@ if [ -z "$INPUT" ]; then
     INPUT="{}"
 fi
 
-# Write event file with timestamp-based unique name
+# Write the payload to a temp file, then rename it into place so the app never
+# reads a partially-written JSON document.
 TIMESTAMP=$(date +%s%N 2>/dev/null || date +%s)
+TEMP_FILE="$EVENT_DIR/.${TIMESTAMP}_${EVENT_TYPE}.json.tmp"
 EVENT_FILE="$EVENT_DIR/${TIMESTAMP}_${EVENT_TYPE}.json"
-
-cat > "$EVENT_FILE" << EVENTEOF
-{"source":"claude","type":"${EVENT_TYPE}","data":${INPUT},"ts":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
-EVENTEOF
+printf '{"source":"claude","type":"%s","data":%s,"ts":"%s"}' \
+  "$EVENT_TYPE" \
+  "$INPUT" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEMP_FILE"
+mv "$TEMP_FILE" "$EVENT_FILE"
 
 exit 0

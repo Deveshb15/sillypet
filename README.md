@@ -6,7 +6,7 @@ A pixel art desktop pet that lives on your macOS screen and monitors your AI cod
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-[![Download SillyPet](https://img.shields.io/badge/Download-SillyPet%20v0.1.0-brightgreen?style=for-the-badge&logo=apple)](https://github.com/Deveshb15/sillypet/releases/latest/download/SillyPet.dmg)
+[![Download SillyPet](https://img.shields.io/badge/Download-SillyPet%20v0.2.2-brightgreen?style=for-the-badge&logo=apple)](https://github.com/Deveshb15/sillypet/releases/latest/download/SillyPet.dmg)
 
 ## What it does
 
@@ -27,9 +27,9 @@ After delivering a notification, the dog walks back to the side of the screen an
 
 **Claude Code** — two methods, both active simultaneously:
 
-1. **JSONL transcript tailing** (works immediately for all sessions): reads `~/.claude/sessions/*.json` to discover active sessions, then tails their JSONL transcripts. Detects `stop_reason=end_turn` (task complete) and `stop_reason=tool_use` (working).
+1. **JSONL transcript tailing** (works immediately for all sessions): reads `~/.claude/sessions/*.json` to discover active sessions, then tails their JSONL transcripts for supplementary working signals such as `stop_reason=tool_use`.
 
-2. **Hook-based events** (works after session restart): auto-installs hooks in `~/.claude/settings.json` for `Notification`, `TaskCompleted`, `SessionStart`, `SessionEnd`, and `Stop` events. A shell script writes event JSON to `/tmp/sillypet-events/`, which the app watches via FSEvents.
+2. **Hook-based events** (works after session restart): auto-installs hooks in `~/.claude/settings.json` for `PermissionRequest`, `TaskCompleted`, `SessionStart`, `SessionEnd`, `PreToolUse`, `Stop`, and `StopFailure`. `PermissionRequest` is the authoritative permission signal, `Stop` maps to normal Claude response completion, and `TaskCompleted` is reserved for Claude task/team workflows. A shell script writes event JSON to `/tmp/sillypet-events/` via atomic rename so the app never reads partial hook files.
 
 **Codex** — tails JSONL session files in `~/.codex/sessions/YYYY/MM/DD/` and parses events: `task_started`, `task_complete`, `agent_message`, `function_call`, `turn_aborted`.
 

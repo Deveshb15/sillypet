@@ -1,37 +1,21 @@
 import Foundation
 
 /// Monitors Claude Code via two methods:
-/// 1. JSONL transcript tailing (works immediately for all sessions)
-/// 2. Hook-based events (works after session restart, more precise)
+/// 1. Hook-based events (authoritative — permission, task completion, session lifecycle)
+/// 2. JSONL transcript tailing (supplementary — working signals only)
 class ClaudeMonitor: AgentMonitor {
     var onEvent: ((AgentEvent) -> Void)?
 
-    // Hook-based monitoring
     private let eventDir = "/tmp/sillypet-events"
     private var dirFD: Int32 = -1
     private var dirSource: DispatchSourceFileSystemObject?
 
-    // JSONL transcript monitoring
     private let sessionsDir: String
     private let projectsDir: String
-    private var transcriptOffsets: [String: UInt64] = [:]  // path -> last read offset
+    private var transcriptOffsets: [String: UInt64] = [:]
     private var knownSessions: Set<String> = []
     private var pollTimer: Timer?
-
-    // Attention detection: when the agent stops (tool_use or end_turn) and no new
-    // transcript activity follows, fire permissionRequest to alert the user
-    private var pendingAttention: [String: (timer: Timer, message: String, toolName: String?)] = [:]
-
-    // Deferred lifecycle events: grace periods to avoid false positives during phase transitions
-    private var pendingSessionEnd: [String: Timer] = [:]
-    private var pendingTaskCompleted: [String: (timer: Timer, message: String, sessionId: String?)] = [:]
-    private var recentSessionIds: [String: Date] = [:]
-    private let sessionEndGracePeriod: TimeInterval = 5.0
-    private let taskCompletedGracePeriod: TimeInterval = 4.0
-
-    // Debounce: don't fire duplicate events too quickly
-    private var lastEventKind: AgentEventKind?
-    private var lastEventTime: Date = .distantPast
+    private var recentEventTimes: [String: Date] = [:]
 
     init() {
         sessionsDir = NSHomeDirectory() + "/.claude/sessions"
@@ -39,9 +23,9 @@ class ClaudeMonitor: AgentMonitor {
     }
 
     func start() {
+        installHooksIfNeeded()
         startHookMonitor()
         startTranscriptMonitor()
-        installHooksIfNeeded()
         print("[ClaudeMonitor] Started (hooks + JSONL transcript monitoring)")
     }
 
@@ -50,17 +34,13 @@ class ClaudeMonitor: AgentMonitor {
         dirSource = nil
         pollTimer?.invalidate()
         pollTimer = nil
-        for (_, pending) in pendingAttention { pending.timer.invalidate() }
-        pendingAttention.removeAll()
-        for (_, timer) in pendingSessionEnd { timer.invalidate() }
-        pendingSessionEnd.removeAll()
-        for (_, pending) in pendingTaskCompleted { pending.timer.invalidate() }
-        pendingTaskCompleted.removeAll()
-        recentSessionIds.removeAll()
-        if dirFD >= 0 { close(dirFD); dirFD = -1 }
+        if dirFD >= 0 {
+            close(dirFD)
+            dirFD = -1
+        }
     }
 
-    // MARK: - JSONL Transcript Monitoring
+    // MARK: - JSONL Transcript Monitoring (working signals only)
 
     private func startTranscriptMonitor() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
@@ -73,7 +53,7 @@ class ClaudeMonitor: AgentMonitor {
         let fm = FileManager.default
         guard let sessionFiles = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
 
-        var activePIDs = Set<String>()
+        var activeSessionIDs = Set<String>()
 
         for file in sessionFiles where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
@@ -81,29 +61,16 @@ class ClaudeMonitor: AgentMonitor {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let sessionId = json["sessionId"] as? String,
                   let cwd = json["cwd"] as? String,
-                  let pid = json["pid"] as? Int else {
+                  let _ = json["pid"] as? Int else {
                 continue
             }
 
-            activePIDs.insert(sessionId)
+            activeSessionIDs.insert(sessionId)
 
             if !knownSessions.contains(sessionId) {
                 knownSessions.insert(sessionId)
-
-                // Check if this session reappeared during a grace period (phase transition)
-                if let pendingEnd = pendingSessionEnd.removeValue(forKey: sessionId) {
-                    pendingEnd.invalidate()
-                    recentSessionIds.removeValue(forKey: sessionId)
-                    // Session never really ended — suppress both end and start
-                } else if let lastSeen = recentSessionIds[sessionId],
-                          Date().timeIntervalSince(lastSeen) < sessionEndGracePeriod {
-                    recentSessionIds.removeValue(forKey: sessionId)
-                    // Same session recycled quickly — phase boundary, suppress start
-                } else {
-                    // Genuinely new session
-                    let name = json["name"] as? String
-                    fireEvent(.sessionStart, message: name ?? "Claude session started", sessionId: sessionId)
-                }
+                let name = json["name"] as? String
+                fireEvent(.sessionStart, message: name ?? "Claude session started", sessionId: sessionId)
             }
 
             let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
@@ -114,12 +81,10 @@ class ClaudeMonitor: AgentMonitor {
             }
         }
 
-        let ended = knownSessions.subtracting(activePIDs)
+        let ended = knownSessions.subtracting(activeSessionIDs)
         for sessionId in ended {
             knownSessions.remove(sessionId)
-            cancelAttentionTimer(sessionId: sessionId)
-            recentSessionIds[sessionId] = Date()
-            scheduleSessionEnd(sessionId: sessionId)
+            fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
         }
     }
 
@@ -132,7 +97,7 @@ class ClaudeMonitor: AgentMonitor {
             return
         }
 
-        let lastOffset = transcriptOffsets[path]!
+        let lastOffset = transcriptOffsets[path] ?? 0
         guard fileSize > lastOffset else { return }
 
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
@@ -145,138 +110,41 @@ class ClaudeMonitor: AgentMonitor {
         guard let text = String(data: newData, encoding: .utf8) else { return }
 
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
-
         for line in lines {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
-
-            // Any new transcript entry means the session is progressing.
-            // Cancel pending attention timer (tool auto-approved or user responded).
-            cancelAttentionTimer(sessionId: sessionId)
-            // Cancel pending taskCompleted — new activity means the previous
-            // task_completed was an intermediate phase, not the final one.
-            cancelPendingTaskCompleted(key: sessionId)
-
             parseTranscriptEntry(json, sessionId: sessionId)
         }
     }
 
     private func parseTranscriptEntry(_ json: [String: Any], sessionId: String) {
         let type = json["type"] as? String ?? ""
-
         guard type == "assistant" else { return }
 
         let message = json["message"] as? [String: Any] ?? [:]
         let stopReason = message["stop_reason"] as? String ?? ""
+        guard stopReason == "tool_use" else { return }
 
-        switch stopReason {
-        case "end_turn":
-            // Claude finished a turn — could be a question, task done, or waiting for input.
-            // Don't fire taskCompleted (that comes from the TaskCompleted hook only).
-            // Start a timer: if no new activity in 8s, alert the user.
-            startAttentionTimer(sessionId: sessionId, delay: 8.0,
-                               message: "Claude needs your input", toolName: nil)
-
-        case "tool_use":
-            let content = message["content"] as? [[String: Any]] ?? []
-            let toolUse = content.first { ($0["type"] as? String) == "tool_use" }
-            let toolName = toolUse?["name"] as? String
-
-            fireEvent(.working, message: "Using \(toolName ?? "tool")", sessionId: sessionId, toolName: toolName)
-
-            // Start attention timer: if no new transcript activity within 5s,
-            // the tool likely needs user permission (or a subagent does).
-            // Hooks are more reliable but don't hot-reload mid-session.
-            startAttentionTimer(sessionId: sessionId, delay: 5.0,
-                               message: "Needs permission for \(toolName ?? "tool")", toolName: toolName)
-
-        default:
-            break
-        }
-    }
-
-    // MARK: - Attention Timer (permission + question detection)
-
-    private func startAttentionTimer(sessionId: String, delay: TimeInterval, message: String, toolName: String?) {
-        cancelAttentionTimer(sessionId: sessionId)
-
-        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            self.pendingAttention.removeValue(forKey: sessionId)
-            self.fireEvent(.permissionRequest,
-                          message: message,
-                          sessionId: sessionId, toolName: toolName)
-        }
-        pendingAttention[sessionId] = (timer: timer, message: message, toolName: toolName)
-    }
-
-    private func cancelAttentionTimer(sessionId: String) {
-        if let pending = pendingAttention.removeValue(forKey: sessionId) {
-            pending.timer.invalidate()
-        }
-    }
-
-    // MARK: - Deferred Lifecycle Events (grace periods)
-
-    private func scheduleSessionEnd(sessionId: String) {
-        pendingSessionEnd[sessionId]?.invalidate()
-
-        let timer = Timer.scheduledTimer(withTimeInterval: sessionEndGracePeriod, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            self.pendingSessionEnd.removeValue(forKey: sessionId)
-            self.recentSessionIds.removeValue(forKey: sessionId)
-            self.cancelPendingTaskCompleted(key: sessionId)
-            self.fireEvent(.sessionEnd, message: "Claude session ended", sessionId: sessionId)
-        }
-        pendingSessionEnd[sessionId] = timer
-    }
-
-    private func scheduleTaskCompleted(sessionId: String?, message: String) {
-        let key = sessionId ?? "unknown"
-        cancelPendingTaskCompleted(key: key)
-
-        let timer = Timer.scheduledTimer(withTimeInterval: taskCompletedGracePeriod, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            self.pendingTaskCompleted.removeValue(forKey: key)
-            self.fireEvent(.taskCompleted, message: message, sessionId: sessionId)
-        }
-        pendingTaskCompleted[key] = (timer: timer, message: message, sessionId: sessionId)
-    }
-
-    private func cancelPendingTaskCompleted(key: String) {
-        if let pending = pendingTaskCompleted.removeValue(forKey: key) {
-            pending.timer.invalidate()
-        }
+        let content = message["content"] as? [[String: Any]] ?? []
+        let toolUse = content.first { ($0["type"] as? String) == "tool_use" }
+        let toolName = toolUse?["name"] as? String
+        fireEvent(.working, message: "Using \(toolName ?? "tool")", sessionId: sessionId, toolName: toolName)
     }
 
     // MARK: - Event Dispatch
 
     private func fireEvent(_ kind: AgentEventKind, message: String, sessionId: String? = nil, toolName: String? = nil) {
         let now = Date()
-        let elapsed = now.timeIntervalSince(lastEventTime)
 
-        // Same-kind debounce
-        if kind == lastEventKind && elapsed < 3.0 {
+        recentEventTimes = recentEventTimes.filter { now.timeIntervalSince($0.value) < 10.0 }
+
+        let key = dedupeKey(kind: kind, sessionId: sessionId, toolName: toolName, message: message)
+        if let last = recentEventTimes[key], now.timeIntervalSince(last) < 3.0 {
             return
         }
-
-        // Sequence debounce: suppress rapid lifecycle event flurries
-        let suppressedSequences: [(AgentEventKind, AgentEventKind, TimeInterval)] = [
-            (.taskCompleted, .sessionEnd, 5.0),
-            (.sessionEnd, .sessionStart, 5.0),
-            (.taskCompleted, .sessionStart, 5.0),
-            (.sessionStart, .taskCompleted, 3.0),
-        ]
-        for (prev, suppressed, window) in suppressedSequences {
-            if lastEventKind == prev && kind == suppressed && elapsed < window {
-                return
-            }
-        }
-
-        lastEventKind = kind
-        lastEventTime = now
+        recentEventTimes[key] = now
 
         let event = AgentEvent(source: .claude, kind: kind, sessionId: sessionId, message: message, toolName: toolName)
         DispatchQueue.main.async { [weak self] in
@@ -284,7 +152,19 @@ class ClaudeMonitor: AgentMonitor {
         }
     }
 
-    // MARK: - Hook-based Monitoring (supplementary)
+    private func dedupeKey(kind: AgentEventKind, sessionId: String?, toolName: String?, message: String) -> String {
+        let session = sessionId ?? "unknown-session"
+        switch kind {
+        case .permissionRequest, .working:
+            return "\(session)|\(kind.rawValue)|\(toolName ?? "unknown-tool")"
+        case .taskCompleted, .error:
+            return "\(session)|\(kind.rawValue)|\(message)"
+        default:
+            return "\(session)|\(kind.rawValue)"
+        }
+    }
+
+    // MARK: - Hook-based Monitoring (authoritative)
 
     private func startHookMonitor() {
         try? FileManager.default.createDirectory(atPath: eventDir, withIntermediateDirectories: true)
@@ -303,11 +183,13 @@ class ClaudeMonitor: AgentMonitor {
         }
 
         source.setCancelHandler { [weak self] in
-            if let fd = self?.dirFD, fd >= 0 { close(fd) }
+            guard let self = self, self.dirFD >= 0 else { return }
+            close(self.dirFD)
+            self.dirFD = -1
         }
 
         source.resume()
-        self.dirSource = source
+        dirSource = source
     }
 
     private func processEventFiles() {
@@ -318,100 +200,15 @@ class ClaudeMonitor: AgentMonitor {
             let path = "\(eventDir)/\(file)"
             guard let data = fm.contents(atPath: path) else { continue }
 
-            if let event = parseHookEvent(data) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.onEvent?(event)
-                }
+            switch ClaudeHookParser.parse(data: data) {
+            case .event(let parsed):
+                fireEvent(parsed.kind, message: parsed.message, sessionId: parsed.sessionId, toolName: parsed.toolName)
+                try? fm.removeItem(atPath: path)
+            case .ignored:
+                try? fm.removeItem(atPath: path)
+            case .incomplete:
+                continue
             }
-            try? fm.removeItem(atPath: path)
-        }
-    }
-
-    private func parseHookEvent(_ data: Data) -> AgentEvent? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let typeStr = json["type"] as? String else { return nil }
-
-        let hookData = json["data"] as? [String: Any] ?? [:]
-        let sessionId = hookData["session_id"] as? String
-
-        switch typeStr {
-        case "notification":
-            // Notification hook — check for permission/idle prompts
-            let nt = hookData["notification_type"] as? String
-            let title = hookData["title"] as? String ?? ""
-            let body = hookData["body"] as? String ?? ""
-            // Match permission_prompt, idle_prompt, or notification text about permissions
-            if nt == "permission_prompt" || nt == "idle_prompt"
-                || title.lowercased().contains("permission")
-                || body.lowercased().contains("permission")
-                || title.lowercased().contains("waiting")
-                || body.lowercased().contains("proceed") {
-                return AgentEvent(source: .claude, kind: .permissionRequest, sessionId: sessionId,
-                                  message: hookData["message"] as? String ?? body,
-                                  toolName: hookData["tool_name"] as? String)
-            }
-            return nil
-
-        case "task_completed":
-            // Defer: if new activity follows within grace period, this was intermediate
-            DispatchQueue.main.async { [weak self] in
-                self?.scheduleTaskCompleted(
-                    sessionId: sessionId,
-                    message: hookData["task_subject"] as? String ?? "Task completed"
-                )
-            }
-            return nil
-
-        case "session_start":
-            // Let JSONL scan handle session starts (it has grace period logic).
-            // Only fire for genuinely unknown sessions.
-            if let sid = sessionId, recentSessionIds[sid] != nil {
-                DispatchQueue.main.async { [weak self] in
-                    self?.pendingSessionEnd[sid]?.invalidate()
-                    self?.pendingSessionEnd.removeValue(forKey: sid)
-                    self?.recentSessionIds.removeValue(forKey: sid)
-                }
-                return nil
-            }
-            return nil  // Let JSONL scan handle it
-
-        case "session_end":
-            // Defer through grace period (same as JSONL path)
-            if let sid = sessionId {
-                DispatchQueue.main.async { [weak self] in
-                    self?.recentSessionIds[sid] = Date()
-                    self?.scheduleSessionEnd(sessionId: sid)
-                }
-            }
-            return nil
-
-        case "stop":
-            // Stop hook fires when the model's turn ends.
-            // If it contains tool_use content, permission is needed.
-            let stopReason = hookData["stop_reason"] as? String
-            let message = hookData["message"] as? [String: Any]
-            let content = (message?["content"] as? [[String: Any]])
-                ?? (hookData["content"] as? [[String: Any]])
-                ?? []
-            let toolUse = content.first { ($0["type"] as? String) == "tool_use" }
-
-            if stopReason == "tool_use" || toolUse != nil {
-                let toolName = toolUse?["name"] as? String
-                return AgentEvent(source: .claude, kind: .permissionRequest, sessionId: sessionId,
-                                  message: "Permission needed for \(toolName ?? "tool")",
-                                  toolName: toolName)
-            }
-            // Non-tool stop is just the model finishing — not a session end
-            return nil
-
-        case "pre_tool_use":
-            // PreToolUse fires for all tools — treat as working signal
-            let toolName = hookData["tool_name"] as? String
-            return AgentEvent(source: .claude, kind: .working, sessionId: sessionId,
-                              message: "Using \(toolName ?? "tool")", toolName: toolName)
-
-        default:
-            return nil
         }
     }
 
@@ -423,26 +220,12 @@ class ClaudeMonitor: AgentMonitor {
         let stableScriptPath = hooksDir + "/sillypet-hook.sh"
         let fm = FileManager.default
 
-        // Always install/update the hook script at a stable location
         try? fm.createDirectory(atPath: hooksDir, withIntermediateDirectories: true)
 
-        let scriptContent = """
-        #!/bin/bash
-        EVENT_TYPE="$1"
-        EVENT_DIR="/tmp/sillypet-events"
-        mkdir -p "$EVENT_DIR"
-        INPUT=""
-        if [ ! -t 0 ]; then INPUT=$(cat); fi
-        if [ -z "$INPUT" ]; then INPUT="{}"; fi
-        TIMESTAMP=$(date +%s%N 2>/dev/null || date +%s)
-        EVENT_FILE="$EVENT_DIR/${TIMESTAMP}_${EVENT_TYPE}.json"
-        printf '{"source":"claude","type":"%s","data":%s,"ts":"%s"}' "$EVENT_TYPE" "$INPUT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$EVENT_FILE"
-        exit 0
-        """
+        let scriptContent = ClaudeHookScript.content
         try? scriptContent.write(toFile: stableScriptPath, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stableScriptPath)
 
-        // Read current settings
         var settings: [String: Any] = [:]
         if let data = fm.contents(atPath: settingsPath),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -451,52 +234,210 @@ class ClaudeMonitor: AgentMonitor {
 
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
-        let events: [(String, String)] = [
-            ("Notification", "notification"),
-            ("TaskCompleted", "task_completed"),
-            ("SessionStart", "session_start"),
-            ("SessionEnd", "session_end"),
-            ("Stop", "stop"),
-            ("PreToolUse", "pre_tool_use"),
+        let desiredHooks: [String: (arg: String, matcher: String)] = [
+            "PermissionRequest": ("permission_request", ""),
+            "TaskCompleted": ("task_completed", ""),
+            "SessionStart": ("session_start", ""),
+            "SessionEnd": ("session_end", ""),
+            "Stop": ("stop", ""),
+            "StopFailure": ("stop_failure", ""),
+            "PreToolUse": ("pre_tool_use", "")
         ]
+        let managedEvents = Set(desiredHooks.keys).union(["Notification"])
 
         var changed = false
-        for (name, arg) in events {
-            var list = hooks[name] as? [[String: Any]] ?? []
-            let correctCommand = "\(stableScriptPath) \(arg)"
 
-            // Find existing sillypet hook entry
-            let existingIdx = list.firstIndex { e in
-                (e["hooks"] as? [[String: Any]] ?? []).contains { ($0["command"] as? String)?.contains("sillypet") == true }
+        for name in managedEvents {
+            let originalList = hooks[name] as? [[String: Any]] ?? []
+            var filteredList = originalList.filter { !Self.isManagedSillyPetHook($0) }
+
+            if let desired = desiredHooks[name] {
+                filteredList.append(Self.makeHookEntry(command: "\(stableScriptPath) \(desired.arg)", matcher: desired.matcher))
             }
 
-            let entry: [String: Any] = [
-                "matcher": "",
-                "hooks": [["type": "command", "command": correctCommand]]
-            ]
-
-            if let idx = existingIdx {
-                // Check if path is correct; update if stale
-                let existingHooks = list[idx]["hooks"] as? [[String: Any]] ?? []
-                let existingCommand = existingHooks.first?["command"] as? String ?? ""
-                if existingCommand != correctCommand {
-                    list[idx] = entry
-                    hooks[name] = list
+            if filteredList.isEmpty {
+                if hooks[name] != nil {
+                    hooks.removeValue(forKey: name)
                     changed = true
                 }
             } else {
-                list.append(entry)
-                hooks[name] = list
-                changed = true
+                hooks[name] = filteredList
+                if !NSArray(array: originalList).isEqual(to: filteredList) {
+                    changed = true
+                }
             }
         }
 
         if changed {
             settings["hooks"] = hooks
             if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-                fm.createFile(atPath: settingsPath, contents: data)
+                let settingsURL = URL(fileURLWithPath: settingsPath)
+                try? data.write(to: settingsURL, options: .atomic)
                 print("[ClaudeMonitor] Hooks updated in \(settingsPath) (script at \(stableScriptPath))")
             }
         }
+    }
+
+    private static func isManagedSillyPetHook(_ entry: [String: Any]) -> Bool {
+        let hookCommands = entry["hooks"] as? [[String: Any]] ?? []
+        return hookCommands.contains { ($0["command"] as? String)?.contains("sillypet-hook.sh") == true }
+    }
+
+    private static func makeHookEntry(command: String, matcher: String) -> [String: Any] {
+        [
+            "matcher": matcher,
+            "hooks": [["type": "command", "command": command]]
+        ]
+    }
+}
+
+struct ClaudeHookScript {
+    static let content = """
+    #!/bin/bash
+    EVENT_TYPE="$1"
+    EVENT_DIR="/tmp/sillypet-events"
+    mkdir -p "$EVENT_DIR"
+    INPUT=""
+    if [ ! -t 0 ]; then INPUT=$(cat); fi
+    if [ -z "$INPUT" ]; then INPUT="{}"; fi
+    TIMESTAMP=$(date +%s%N 2>/dev/null || date +%s)
+    TEMP_FILE="$EVENT_DIR/.${TIMESTAMP}_${EVENT_TYPE}.json.tmp"
+    EVENT_FILE="$EVENT_DIR/${TIMESTAMP}_${EVENT_TYPE}.json"
+    printf '{"source":"claude","type":"%s","data":%s,"ts":"%s"}' "$EVENT_TYPE" "$INPUT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEMP_FILE"
+    mv "$TEMP_FILE" "$EVENT_FILE"
+    exit 0
+    """
+}
+
+struct ParsedClaudeHookEvent: Equatable {
+    let kind: AgentEventKind
+    let sessionId: String?
+    let message: String
+    let toolName: String?
+}
+
+enum ClaudeHookParseResult: Equatable {
+    case event(ParsedClaudeHookEvent)
+    case ignored
+    case incomplete
+}
+
+struct ClaudeHookParser {
+    static func parse(data: Data) -> ClaudeHookParseResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String else {
+            return .incomplete
+        }
+
+        let hookData = json["data"] as? [String: Any] ?? [:]
+        let sessionId = hookData["session_id"] as? String
+
+        switch type {
+        case "permission_request":
+            let toolName = hookData["tool_name"] as? String
+            let message = firstNonEmptyString(
+                hookData["message"] as? String,
+                hookData["title"] as? String,
+                toolName.map { "Claude needs permission for \($0)" },
+                "Claude needs permission"
+            )
+            return .event(ParsedClaudeHookEvent(
+                kind: .permissionRequest,
+                sessionId: sessionId,
+                message: message,
+                toolName: toolName
+            ))
+
+        case "notification":
+            let notificationType = hookData["notification_type"] as? String
+            if notificationType == "idle_prompt" {
+                return .ignored
+            }
+            return .ignored
+
+        case "task_completed":
+            let teammate = hookData["teammate_name"] as? String
+            let subject = firstNonEmptyString(
+                hookData["task_subject"] as? String,
+                hookData["task_description"] as? String,
+                "Task completed"
+            )
+            let message: String
+            if let teammate, !teammate.isEmpty {
+                message = "\(teammate) completed: \(subject)"
+            } else {
+                message = subject
+            }
+            return .event(ParsedClaudeHookEvent(
+                kind: .taskCompleted,
+                sessionId: sessionId,
+                message: message,
+                toolName: nil
+            ))
+
+        case "session_start":
+            return .event(ParsedClaudeHookEvent(
+                kind: .sessionStart,
+                sessionId: sessionId,
+                message: "Session started",
+                toolName: nil
+            ))
+
+        case "session_end":
+            return .event(ParsedClaudeHookEvent(
+                kind: .sessionEnd,
+                sessionId: sessionId,
+                message: "Session ended",
+                toolName: nil
+            ))
+
+        case "pre_tool_use":
+            let toolName = hookData["tool_name"] as? String
+            return .event(ParsedClaudeHookEvent(
+                kind: .working,
+                sessionId: sessionId,
+                message: "Using \(toolName ?? "tool")",
+                toolName: toolName
+            ))
+
+        case "stop":
+            let message = firstNonEmptyString(
+                hookData["last_assistant_message"] as? String,
+                "Task completed"
+            )
+            return .event(ParsedClaudeHookEvent(
+                kind: .taskCompleted,
+                sessionId: sessionId,
+                message: message,
+                toolName: nil
+            ))
+
+        case "stop_failure":
+            let message = firstNonEmptyString(
+                hookData["last_assistant_message"] as? String,
+                hookData["error_details"] as? String,
+                hookData["error"] as? String,
+                "Claude stopped with an error"
+            )
+            return .event(ParsedClaudeHookEvent(
+                kind: .error,
+                sessionId: sessionId,
+                message: message,
+                toolName: nil
+            ))
+
+        default:
+            return .ignored
+        }
+    }
+
+    private static func firstNonEmptyString(_ candidates: String?...) -> String {
+        for candidate in candidates {
+            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return ""
     }
 }
